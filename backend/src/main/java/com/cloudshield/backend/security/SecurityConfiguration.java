@@ -51,11 +51,12 @@ public class SecurityConfiguration {
             @Value("${cloudshield.probe.api-key:}") String probeKey) throws Exception {
         var csrfRepository = CookieCsrfTokenRepository.withHttpOnlyFalse();
         csrfRepository.setCookiePath("/");
-        RequestMatcher probePost = PathPatternRequestMatcher.pathPattern(HttpMethod.POST, "/api/probe/heartbeat");
+        RequestMatcher heartbeatPost = PathPatternRequestMatcher.pathPattern(HttpMethod.POST, "/api/probe/heartbeat");
+        RequestMatcher metricsPost = PathPatternRequestMatcher.pathPattern(HttpMethod.POST, "/api/probe/metrics");
         http
             .csrf(csrf -> csrf.csrfTokenRepository(csrfRepository)
                     .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
-                    .ignoringRequestMatchers(request -> probePost.matches(request) && validProbeKey(request, probeKey)))
+                    .ignoringRequestMatchers(request -> (heartbeatPost.matches(request) || metricsPost.matches(request)) && validProbeKey(request, probeKey)))
             .cors(cors -> {})
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED)
                     .sessionFixation(fixation -> fixation.changeSessionId()))
@@ -64,7 +65,7 @@ public class SecurityConfiguration {
             .authorizeHttpRequests(auth -> auth
                     .requestMatchers(HttpMethod.GET, "/api/health", "/api/probe/heartbeat", "/api/auth/csrf").permitAll()
                     .requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
-                    .requestMatchers(HttpMethod.POST, "/api/probe/heartbeat").access((authentication, context) ->
+                    .requestMatchers(HttpMethod.POST, "/api/probe/heartbeat", "/api/probe/metrics").access((authentication, context) ->
                             new org.springframework.security.authorization.AuthorizationDecision(validProbeKey(context.getRequest(), probeKey)))
                     .requestMatchers("/api/auth/logout", "/api/auth/me").authenticated()
                     .requestMatchers("/api/admin/**").hasRole("ADMIN")

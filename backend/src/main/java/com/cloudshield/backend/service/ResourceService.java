@@ -15,6 +15,9 @@ public class ResourceService {
     public ResourceService(MonitoredResourceRepository repository) { this.repository = repository; }
     @Transactional(readOnly = true) public List<MonitoredResource> list(int page, int size) { return repository.findAll(PageRequest.of(page, size)).getContent(); }
     @Transactional(readOnly = true) public MonitoredResource get(UUID id) { return repository.findById(id).orElseThrow(() -> new NotFoundException("Resource not found")); }
+    @Transactional(readOnly = true) public MonitoredResource findByIdentifier(String identifier) { return repository.findByResourceIdentifier(identifier).orElseThrow(() -> new NotFoundException("Resource not found")); }
+    @Transactional public MonitoredResource lock(UUID id) { return repository.lockById(id).orElseThrow(() -> new NotFoundException("Resource not found")); }
+    @Transactional public MonitoredResource lockByIdentifier(String identifier) { return repository.lockByIdentifier(identifier).orElseThrow(() -> new NotFoundException("Resource not found")); }
     @Transactional public MonitoredResource create(ResourceRequest request) {
         if (repository.existsByResourceIdentifier(request.resourceIdentifier())) throw new ConflictException("Resource identifier already exists");
         return repository.save(new MonitoredResource(request.resourceIdentifier(), request.name(), request.resourceType(), request.address(), request.environment(), request.status()));

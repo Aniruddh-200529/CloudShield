@@ -9,4 +9,5 @@ import org.springframework.data.jpa.repository.JpaRepository;
 public interface ProbeHeartbeatRepository extends JpaRepository<ProbeHeartbeat, UUID> {
     List<ProbeHeartbeat> findByProbeIdentifierOrderByReceivedAtDesc(String probeIdentifier, Pageable pageable);
     List<ProbeHeartbeat> findAllByOrderByReceivedAtDesc(Pageable pageable);
+    java.util.Optional<ProbeHeartbeat> findFirstByResource_IdOrderByReceivedAtDesc(java.util.UUID resourceId);
 }

@@ -23,7 +23,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class ResourceController {
     private final ResourceService service;
     public ResourceController(ResourceService service) { this.service = service; }
-    @GetMapping public List<ResourceResponse> list(@RequestParam(defaultValue = "0") @Min(0) int page, @RequestParam(defaultValue = "100") @Min(1) @Max(200) int size) { return service.list(page, size).stream().map(ResourceResponse::from).toList(); }
+    @GetMapping public List<ResourceResponse> list(@RequestParam(defaultValue = "0") @Min(0) @Max(10000) int page, @RequestParam(defaultValue = "100") @Min(1) @Max(200) int size) { return service.list(page, size).stream().map(ResourceResponse::from).toList(); }
     @PostMapping public ResponseEntity<ResourceResponse> create(@Valid @RequestBody ResourceRequest request) { var result = ResourceResponse.from(service.create(request)); return ResponseEntity.created(URI.create("/api/resources/" + result.id())).body(result); }
     @GetMapping("/{id}") public ResourceResponse get(@PathVariable UUID id) { return ResourceResponse.from(service.get(id)); }
     @PutMapping("/{id}") public ResourceResponse update(@PathVariable UUID id, @Valid @RequestBody ResourceRequest request) { return ResourceResponse.from(service.update(id, request)); }

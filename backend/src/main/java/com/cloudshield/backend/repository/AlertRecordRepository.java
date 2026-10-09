@@ -9,4 +9,6 @@ import org.springframework.data.jpa.repository.JpaRepository;
 public interface AlertRecordRepository extends JpaRepository<AlertRecord, UUID> {
     List<AlertRecord> findAllByOrderByCreatedAtDesc(Pageable pageable);
     List<AlertRecord> findByStatusOrderByCreatedAtDesc(String status, Pageable pageable);
+    java.util.Optional<AlertRecord> findFirstByDeduplicationKeyAndStatusIn(String key, java.util.Collection<String> statuses);
+    List<AlertRecord> findByResource_IdOrderByCreatedAtDesc(UUID resourceId, Pageable pageable);
 }

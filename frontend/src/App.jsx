@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, refreshCsrf } from "./api";
+import MonitoringDashboard from "./MonitoringDashboard";
 import "./App.css";
 
 function App() {
@@ -61,16 +62,11 @@ function App() {
       {user.role === "ADMIN" && <button className={tab === "users" ? "nav-item active" : "nav-item"} onClick={() => setTab("users")}>♙ <span>User access</span></button>}
     </nav><div className="sidebar-foot"><span className="dot online" />{health}</div>
   </aside><main className="main-panel">
-    <header className="topbar"><div><p className="eyebrow">CLOUDSHIELD / {tab === "users" ? "ACCESS" : "MONITORING"}</p><h1>{tab === "users" ? "User access" : "Overview"}</h1></div>
+    <header className="topbar"><div><p className="eyebrow">CLOUDSHIELD / {tab === "users" ? "ACCESS" : "MONITORING"}</p><h1>{tab === "users" ? "User access" : "Monitoring"}</h1></div>
       <div className="profile"><div className="avatar">{user.displayName?.slice(0, 1).toUpperCase()}</div><div><strong>{user.displayName}</strong><span>{user.role}</span></div><button className="quiet-button" onClick={signOut}>Sign out</button></div>
     </header>
     {error && <div className="notice error" role="alert">{error}</div>}
-    {tab === "overview" ? <section className="content-grid">
-      <article className="welcome-panel"><div><p className="eyebrow">YOUR WORKSPACE</p><h2>Infrastructure at a glance</h2><p className="muted">Your account is active and your access is managed by the {user.role.toLowerCase()} role.</p></div><span className="shield-icon">✦</span></article>
-      <article className="stat-card"><span className="stat-icon green">✓</span><div><p>Backend status</p><strong>{health}</strong></div><span className="status-pill">ONLINE</span></article>
-      <article className="stat-card"><span className="stat-icon blue">♙</span><div><p>Signed in as</p><strong>{user.displayName}</strong></div><span className="role-pill">{user.role}</span></article>
-      <article className="info-panel"><p className="eyebrow">SECURITY</p><h3>Protected session</h3><p className="muted">Your browser session uses a server-managed cookie and CSRF protection.</p></article>
-    </section> : <section className="users-layout">
+    {tab === "overview" ? <MonitoringDashboard role={user.role} /> : <section className="users-layout">
       <article className="panel"><p className="eyebrow">DIRECTORY</p><h2>People and roles</h2><div className="user-list">{users.map((person) => <div className="user-row" key={person.id}>
         <div className="avatar small">{person.displayName.slice(0, 1).toUpperCase()}</div><div className="user-info"><strong>{person.displayName}</strong><span>{person.username} · {person.enabled ? "Enabled" : "Disabled"}</span></div><span className="role-pill">{person.role}</span>
       </div>)}</div></article>

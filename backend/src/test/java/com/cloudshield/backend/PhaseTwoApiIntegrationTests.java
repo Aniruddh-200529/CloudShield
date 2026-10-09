@@ -111,6 +111,50 @@ class PhaseTwoApiIntegrationTests {
     }
 
     @Test
+    void probeTelemetryIsPersistedIdempotentCorrelatedAndRecovered() throws Exception {
+        String identifier = "telemetry-" + UUID.randomUUID();
+        var created = post("/api/resources", """
+                {"resourceIdentifier":"%s","name":"Telemetry host","resourceType":"HOST","status":"ACTIVE"}
+                """.formatted(identifier));
+        assertThat(created.statusCode()).isEqualTo(201);
+        String resourceId = mapper.readTree(created.body()).get("id").asText();
+        String probe = "probe-" + UUID.randomUUID();
+        java.time.Instant first = java.time.Instant.now().minusSeconds(2);
+        java.time.Instant second = java.time.Instant.now().minusSeconds(1);
+        String firstObservation = UUID.randomUUID().toString();
+        String firstBody = telemetryBody(probe, identifier, firstObservation, 92, first);
+        var firstResponse = postProbeMetrics(firstBody);
+        assertThat(firstResponse.statusCode()).isEqualTo(200).as(firstResponse.body());
+        assertThat(mapper.readTree(firstResponse.body()).get("accepted").asInt()).isEqualTo(1);
+        assertThat(postProbeMetrics(firstBody).body()).contains("\"accepted\":0", "\"duplicates\":1");
+        var secondResponse = postProbeMetrics(telemetryBody(probe, identifier, UUID.randomUUID().toString(), 93, second));
+        assertThat(secondResponse.statusCode()).isEqualTo(200);
+        assertThat(get("/api/resources/" + resourceId + "/metrics?limit=10").body()).contains("cpu.utilization", "92.0", "93.0");
+        String openAlerts = get("/api/alerts?status=OPEN&limit=500").body();
+        assertThat(openAlerts).contains("METRIC_THRESHOLD", resourceId);
+        // Verify the incident lifecycle through the alert collection and its timeline endpoint.
+        JsonNode alertsJson = mapper.readTree(openAlerts);
+        String alertId = "";
+        for (JsonNode candidate : alertsJson) if ("METRIC_THRESHOLD".equals(candidate.get("alertType").asText()) && resourceId.equals(candidate.get("resourceId").asText())) { alertId = candidate.get("id").asText(); break; }
+        assertThat(alertId).isNotBlank();
+        assertThat(get("/api/alerts/" + alertId).body()).contains("METRIC_THRESHOLD");
+        assertThat(patch("/api/alerts/" + alertId + "/status", "{\"status\":\"ACKNOWLEDGED\"}").statusCode()).isEqualTo(200);
+        assertThat(get("/api/alerts/" + alertId + "/history?limit=10").body()).contains("ACKNOWLEDGED");
+        assertThat(postProbeMetrics(telemetryBody(probe, identifier, UUID.randomUUID().toString(), 30, java.time.Instant.now())).statusCode()).isEqualTo(200);
+        assertThat(get("/api/alerts?status=RESOLVED&limit=500").body()).contains(alertId);
+        assertThat(get("/api/audit-events?limit=500").body()).contains("ALERT_CREATED", "ALERT_AUTO_RESOLVED", alertId);
+    }
+
+    private String telemetryBody(String probe, String resource, String observationId, double value, java.time.Instant at) {
+        return """
+                {"probeIdentifier":"%s","resourceIdentifier":"%s","observations":[{"observationId":"%s","metricType":"CPU_UTILIZATION","value":%s,"unit":"percent","collectedAt":"%s"}]}
+                """.formatted(probe, resource, observationId, value, at);
+    }
+    private HttpResponse<String> postProbeMetrics(String body) throws Exception {
+        return HttpClient.newHttpClient().send(HttpRequest.newBuilder(uri("/api/probe/metrics")).header("Content-Type", "application/json").header("X-Probe-Key", TEST_PROBE_KEY).POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
     void rejectsInvalidAndDuplicateResourcesAndReportsMissingRecords() throws Exception {
         String id = "duplicate-" + UUID.randomUUID();
         String valid = """

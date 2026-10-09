@@ -20,12 +20,17 @@ public class MetricSample {
     @Column(name = "metric_value", nullable = false) private double value;
     @Column(length = 32) private String unit;
     @Column(name = "collected_at", nullable = false) private Instant collectedAt;
+    @Column(name = "probe_identifier", length = 160) private String probeIdentifier;
+    @Column(name = "observation_id") private UUID observationId;
     protected MetricSample() {}
     public MetricSample(MonitoredResource resource, String metricType, double value, String unit, Instant collectedAt) { this.resource = resource; this.metricType = metricType; this.value = value; this.unit = unit; this.collectedAt = collectedAt; }
+    public MetricSample(MonitoredResource resource, String metricType, double value, String unit, Instant collectedAt, String probeIdentifier, UUID observationId) { this(resource, metricType, value, unit, collectedAt); this.probeIdentifier = probeIdentifier; this.observationId = observationId; }
     public UUID getId() { return id; }
     public MonitoredResource getResource() { return resource; }
     public String getMetricType() { return metricType; }
     public double getValue() { return value; }
     public String getUnit() { return unit; }
     public Instant getCollectedAt() { return collectedAt; }
+    public String getProbeIdentifier() { return probeIdentifier; }
+    public UUID getObservationId() { return observationId; }
 }

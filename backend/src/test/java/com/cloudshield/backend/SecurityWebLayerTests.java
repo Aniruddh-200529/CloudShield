@@ -14,6 +14,7 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -54,7 +55,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.MockMvcPrint;
 import com.cloudshield.backend.api.*;
 
 @WebMvcTest(controllers = {HealthController.class, ProbeController.class, ResourceController.class,
-        MetricController.class, AuditEventController.class, AlertController.class, AuthController.class, AdminUserController.class})
+        ProbeMetricsController.class, MetricController.class, AuditEventController.class, AlertController.class, AuthController.class, AdminUserController.class})
 @AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import({SecurityConfiguration.class, DatabaseUserDetailsService.class, CurrentUserFilter.class, WebConfiguration.class})
 class SecurityWebLayerTests {
@@ -70,6 +71,7 @@ class SecurityWebLayerTests {
     @MockitoBean ResourceService resources;
     @MockitoBean MetricService metrics;
     @MockitoBean HeartbeatService heartbeats;
+    @MockitoBean com.cloudshield.backend.service.ProbeTelemetryService telemetry;
     @MockitoBean AuditEventService auditEvents;
     @MockitoBean AlertService alerts;
     @MockitoBean LoginAttemptLimiter loginLimiter;
@@ -84,7 +86,7 @@ class SecurityWebLayerTests {
 
     @Test void viewerCanReadOperationalDataButCannotWriteOrAdminister() throws Exception {
         when(resources.list(0, 100)).thenReturn(List.of());
-        when(alerts.list(null, 100)).thenReturn(List.of());
+        when(alerts.list(null, 0, 100)).thenReturn(List.of());
         mvc.perform(get("/api/resources").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
         mvc.perform(get("/api/alerts").with(user("viewer").roles("VIEWER"))).andExpect(status().isOk());
         mvc.perform(get("/api/audit-events").with(user("viewer").roles("VIEWER"))).andExpect(status().isForbidden());
@@ -93,6 +95,9 @@ class SecurityWebLayerTests {
                 .contentType("application/json").content("{}"))
                 .andExpect(status().isForbidden());
         verify(resources, never()).create(any());
+        mvc.perform(patch("/api/alerts/" + UUID.randomUUID() + "/status").with(user("viewer").roles("VIEWER")).with(csrf())
+                .contentType("application/json").content("{\"status\":\"RESOLVED\"}"))
+                .andExpect(status().isForbidden());
     }
 
     @Test void devopsCanPerformOperationalWritesButCannotUseAdminOrAuditWriteRoutes() throws Exception {
@@ -179,7 +184,38 @@ class SecurityWebLayerTests {
                 .andExpect(status().isUnauthorized());
         mvc.perform(get("/api/probe/heartbeats").header("X-Probe-Key", PROBE_KEY))
                 .andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/resources/" + UUID.randomUUID() + "/metrics").header("X-Probe-Key", PROBE_KEY))
+                .andExpect(status().isUnauthorized());
         mvc.perform(get("/api/resources").header("X-Probe-Key", PROBE_KEY))
                 .andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/alerts").header("X-Probe-Key", PROBE_KEY).with(csrf())
+                .contentType("application/json").content("{\"alertType\":\"TEST\",\"severity\":\"HIGH\",\"description\":\"probe cannot create alerts\"}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test void probeKeyCanSubmitOnlyTelemetryAndIsRequiredForMetricIngestion() throws Exception {
+        when(telemetry.ingest(any())).thenReturn(new ProbeMetricResponse(1, 0));
+        String body = "{\"probeIdentifier\":\"probe-a\",\"resourceIdentifier\":\"host-a\",\"observations\":[{\"observationId\":\"" + UUID.randomUUID() + "\",\"metricType\":\"cpu.utilization\",\"value\":12.5,\"unit\":\"%\",\"collectedAt\":\"2026-10-10T00:00:00Z\"}]}";
+        mvc.perform(post("/api/probe/metrics").header("X-Probe-Key", PROBE_KEY).contentType("application/json").content(body))
+                .andExpect(status().isOk()).andExpect(content().json("{\"accepted\":1,\"duplicates\":0}"));
+        mvc.perform(post("/api/probe/metrics").header("X-Probe-Key", UUID.randomUUID().toString()).with(csrf()).contentType("application/json").content(body))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/alerts").header("X-Probe-Key", PROBE_KEY)).andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/admin/users").header("X-Probe-Key", PROBE_KEY).with(csrf()).contentType("application/json").content("{}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test void devopsCanChangeAlertStateOnlyWithCsrfAndViewerCannot() throws Exception {
+        UUID id = UUID.randomUUID();
+        when(alerts.updateStatus(eq(id), eq("ACKNOWLEDGED"), eq("ops")))
+                .thenReturn(new com.cloudshield.backend.domain.AlertRecord("CAPACITY", "HIGH", "Capacity high", null, "ACKNOWLEDGED"));
+        mvc.perform(patch("/api/alerts/" + id + "/status").with(user("ops").roles("DEVOPS"))
+                .contentType("application/json").content("{\"status\":\"ACKNOWLEDGED\"}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(patch("/api/alerts/" + id + "/status").with(user("ops").roles("DEVOPS")).with(csrf())
+                .contentType("application/json").content("{\"status\":\"ACKNOWLEDGED\"}"))
+                .andExpect(status().isOk());
+        verify(alerts).updateStatus(eq(id), eq("ACKNOWLEDGED"), eq("ops"));
+        mvc.perform(get("/api/alerts?page=10001").with(user("viewer").roles("VIEWER"))).andExpect(status().isBadRequest());
     }
 }

@@ -6,4 +6,6 @@ import jakarta.validation.constraints.Size;
 import java.time.Instant;
 import java.util.UUID;
 
-public record HeartbeatRequest(@NotBlank @Size(max = 160) String probeIdentifier, UUID resourceId, @NotBlank @Pattern(regexp = "HEALTHY|DEGRADED|UNHEALTHY") String status, @Size(max = 500) String healthMessage, Instant receivedAt) {}
+public record HeartbeatRequest(@NotBlank @Size(max = 160) String probeIdentifier, UUID resourceId,
+        @Size(max = 160) String resourceIdentifier, @NotBlank @Pattern(regexp = "HEALTHY|DEGRADED|UNHEALTHY") String status,
+        @Size(max = 500) String healthMessage, Instant receivedAt) {}

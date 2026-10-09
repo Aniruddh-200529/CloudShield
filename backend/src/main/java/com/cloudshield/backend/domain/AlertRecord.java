@@ -25,8 +25,10 @@ public class AlertRecord {
     @Column(name = "acknowledged_at") private Instant acknowledgedAt;
     @Column(name = "resolved_at") private Instant resolvedAt;
     @Column(name = "updated_at", nullable = false) private Instant updatedAt;
+    @Column(name = "deduplication_key", length = 240) private String deduplicationKey;
     protected AlertRecord() {}
     public AlertRecord(String alertType, String severity, String description, MonitoredResource resource, String status) { this.alertType = alertType; this.severity = severity; this.description = description; this.resource = resource; this.status = status; this.createdAt = Instant.now(); this.updatedAt = this.createdAt; }
+    public AlertRecord(String alertType, String severity, String description, MonitoredResource resource, String status, String deduplicationKey) { this(alertType, severity, description, resource, status); this.deduplicationKey = deduplicationKey; }
     @PreUpdate void onUpdate() { updatedAt = Instant.now(); }
     public void changeStatus(String status) {
         if ("RESOLVED".equals(this.status) && "ACKNOWLEDGED".equals(status)) {
@@ -49,4 +51,5 @@ public class AlertRecord {
     public Instant getAcknowledgedAt() { return acknowledgedAt; }
     public Instant getResolvedAt() { return resolvedAt; }
     public Instant getUpdatedAt() { return updatedAt; }
+    public String getDeduplicationKey() { return deduplicationKey; }
 }

@@ -1,41 +1,34 @@
 package com.cloudshield.probe;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
 
 @Component
 @ConditionalOnProperty(name = "cloudshield.probe.heartbeat.enabled", havingValue = "true", matchIfMissing = true)
 public class ProbeHeartbeat implements CommandLineRunner {
-
-    private final RestClient restClient;
-    private final String backendUrl;
-    private final String probeIdentifier;
-    private final String probeApiKey;
-
-    public ProbeHeartbeat(@Value("${cloudshield.backend.url:http://localhost:8080}") String backendUrl,
-            @Value("${cloudshield.probe.identifier:local-probe}") String probeIdentifier,
-            @Value("${cloudshield.probe.api-key:}") String probeApiKey) {
-        this.restClient = RestClient.create();
-        this.backendUrl = backendUrl;
-        this.probeIdentifier = probeIdentifier;
-        this.probeApiKey = probeApiKey;
-    }
-
-    @Override
-    public void run(String... args) {
-
-        String response = restClient
-                .post()
-                .uri(backendUrl + "/api/probe/heartbeat")
-                .header("X-Probe-Key", probeApiKey)
-                .body(java.util.Map.of("probeIdentifier", probeIdentifier, "status", "HEALTHY",
-                        "healthMessage", "Probe process started"))
-                .retrieve()
-                .body(String.class);
-
-        System.out.println("Probe heartbeat recorded: " + (response != null));
+    private static final Logger LOG = Logger.getLogger(ProbeHeartbeat.class.getName());
+    private final SystemMetricCollector collector;
+    private final TelemetrySubmitter submitter;
+    private final ProbeSettings settings;
+    private final AtomicBoolean running = new AtomicBoolean();
+    public ProbeHeartbeat(SystemMetricCollector collector, TelemetrySubmitter submitter, ProbeSettings settings) { this.collector = collector; this.submitter = submitter; this.settings = settings; }
+    @Override public void run(String... args) { collectAndSend(); }
+    @Scheduled(fixedDelayString = "${cloudshield.probe.collection-interval-ms:30000}")
+    public void scheduledCollection() { collectAndSend(); }
+    void collectAndSend() {
+        if (!running.compareAndSet(false, true)) return;
+        try {
+            var observations = collector.collect();
+            submitter.heartbeat(settings.probeIdentifier(), settings.resourceIdentifier(), "HEALTHY", "Collection completed; metrics=" + observations.size());
+            submitter.metrics(settings.probeIdentifier(), settings.resourceIdentifier(), observations);
+            LOG.info("Probe telemetry submitted: observations=" + observations.size());
+        } catch (RuntimeException ex) {
+            LOG.log(Level.WARNING, "Probe telemetry submission failed; the next scheduled collection will retry");
+        } finally { running.set(false); }
     }
 }
