@@ -126,7 +126,29 @@ ADMIN can manage users and access the resource, metric, heartbeat history, alert
 
 The probe submits only `POST /api/probe/heartbeat` and `POST /api/probe/metrics` using the shared `X-Probe-Key` header. Set the same high-entropy `PROBE_API_KEY` for the backend and probe; the backend compares it in constant time and skips CSRF only for those two POST routes when the key is valid. The key is never returned by an API. The probe cannot access heartbeat history, user routes, alerts, or other APIs. Do not expose this service key in frontend configuration. Login attempts are rate-limited per source IP in the running backend process; this in-memory limit is not shared across multiple backend replicas.
 
-Authentication successes/failures, logout, and user provisioning/role/enabled changes are recorded in `audit_events`. These security audit writes do not include passwords, cookies, or service keys. Failed login responses do not reveal whether a username exists. MFA, external identity federation, and distributed rate limiting are not part of Phase 3.
+Authentication successes/failures, logout, user provisioning/role/enabled changes, and MFA enrollment/verification/disablement are recorded in `audit_events`. These security audit writes do not include passwords, OTP values, provisioning URIs, cookies, service keys, or MFA secrets. Failed login responses do not reveal whether a username exists. Login and MFA throttles are process-local; they are not distributed across backend replicas.
+
+### Phase 7 MFA and security hardening
+
+MFA is optional per account and uses RFC 6238 TOTP (six digits, 30-second period, SHA-1). The server stores the TOTP secret only as AES-256-GCM ciphertext in `user_accounts`; the encryption key is read from `MFA_ENCRYPTION_KEY`, which must be a stable Base64 encoding of exactly 32 random bytes. Provision this value through a secrets manager or a protected process environment, back it up securely, and keep it unchanged across restarts. If it is missing or invalid, MFA enrollment and verification fail closed with `503`; existing accounts without MFA can still log in. Loss of the key prevents MFA-enabled accounts from verifying. Recovery codes and self-service recovery are not implemented.
+
+After an MFA-enabled account supplies a correct password, login returns `202 {"mfaRequired":true}` and stores a five-minute challenge marker in its server-side session; no authenticated user session is granted until `POST /api/auth/mfa/challenge` succeeds. Session fixation protection rotates the session ID. Codes are verified within a one-step clock window and a successful TOTP time step cannot be reused. MFA verification allows five failures per source address in a ten-minute in-process window. Enrollment confirmation and disablement share that limit. MFA disablement requires both the current password and a valid TOTP code. The setup response contains a one-time `otpauth` provisioning URI; the frontend holds it in component memory and clears it after confirmation.
+
+| Method | Endpoint | Access | Request / behavior |
+|---|---|---|---|
+| GET | `/api/auth/mfa/status` | Signed in | Returns only `{"enabled":true|false}`. |
+| POST | `/api/auth/mfa/enrollment` | Signed in + CSRF | Starts enrollment and returns a one-time `provisioningUri`; configure an authenticator app from it. |
+| POST | `/api/auth/mfa/confirm` | Signed in + CSRF | `{"code":"123456"}` confirms enrollment; pending setup is held server-side in the session. |
+| POST | `/api/auth/mfa/challenge` | Login challenge + CSRF | `{"code":"123456"}` completes login after password verification. |
+| POST | `/api/auth/mfa/disable` | Signed in + CSRF | `{"password":"...","code":"123456"}` requires password reauthentication and TOTP. |
+
+All browser mutations remain CSRF-protected. Probe-key authorization remains limited to heartbeat and metric ingestion. Existing role permissions are enforced in the backend; the frontend only mirrors those permissions. Default Spring Security response headers remain enabled, with explicit `Referrer-Policy: no-referrer` and a restrictive `Permissions-Policy`; deployments must use HTTPS and set `SESSION_COOKIE_SECURE=true`. `SESSION_COOKIE_SAME_SITE` accepts `Lax`, `Strict`, or `None`; `None` requires Secure cookies. Configure `CLOUDSHIELD_CORS_ALLOWED_ORIGIN` to the exact frontend origin before deployment; the current development allowlist is `http://localhost:5173` and wildcard origins are rejected.
+
+### Phases 8–10 frontend and evaluation
+
+The frontend includes role-aware monitoring, audit history for ADMIN/DEVOPS, administrator user enable/role controls, and MFA enrollment/challenge/disable flows. MFA secrets and provisioning URIs are not written to browser storage. Live telemetry displays only values returned by the API; absent and stale observations are labeled separately.
+
+The conference-paper evaluation procedure, metric definitions, run protocol, and results template are in [`documentation/evaluation-protocol.md`](documentation/evaluation-protocol.md). It intentionally contains no benchmark outcomes: overhead, throughput, detection delay, false-positive, missed-detection, and security evaluation values must be measured on the stated target environment before publication.
 
 ## Phases 4–6 monitoring and alerting
 
@@ -174,13 +196,14 @@ Spring maps these to `cloudshield.backend.url`, `cloudshield.probe.identifier`, 
 ### Local setup and commands (Windows PowerShell)
 
 1. Start the local PostgreSQL service. Create the `cloudshield` database if needed. Do not point these commands at another database.
-2. Ensure `JAVA_HOME` points to a Java 21 JDK (the Maven Wrapper uses `JAVA_HOME` when it is set). Set the PostgreSQL password and initial bootstrap settings in the current PowerShell session. The password prompts are masked and are not written to disk. Configure bootstrap values only for the first startup, and set a strong one-time administrator password:
+2. Ensure `JAVA_HOME` points to a Java 21 JDK (the Maven Wrapper uses `JAVA_HOME` when it is set). Set the PostgreSQL password and initial bootstrap settings in the current PowerShell session. The password prompts are masked and are not written to disk. Configure bootstrap values only for the first startup, and set a strong one-time administrator password. MFA is optional but cannot be enabled until a stable encryption key is provisioned:
 
    ```powershell
    $env:DB_PASSWORD = Read-Host -Prompt "PostgreSQL password" -MaskInput
    $env:BOOTSTRAP_ADMIN_USERNAME = "cloudshield-admin"
    $env:BOOTSTRAP_ADMIN_PASSWORD = Read-Host -Prompt "Initial CloudShield admin password" -MaskInput
    $env:PROBE_API_KEY = Read-Host -Prompt "Probe service key" -MaskInput
+   $env:MFA_ENCRYPTION_KEY = Read-Host -Prompt "Base64-encoded 32-byte MFA encryption key" -MaskInput
    ```
 
 3. Inspect/apply migrations and run the backend:
@@ -228,4 +251,4 @@ psql -h localhost -p 5432 -U postgres -d cloudshield -c "SELECT probe_identifier
 
 The probe test configuration loads Mockito as a JVM startup agent for Surefire. This avoids a Windows native `javatool` attach-pipe failure observed when Mockito attempted dynamic agent loading. The test resource disables the heartbeat runner, so the context-load test does not contact the backend. Use the configured Java 21 JDK for the probe test command.
 
-Phases 4–6 now include host collection, authenticated backend ingestion, deterministic threshold/staleness/security indicators, persisted alerts with lifecycle history, and the role-aware monitoring dashboard. Platform sensor availability, real production accuracy, scale, and causal relationships have not been benchmarked. Metric threshold processing runs in the telemetry request transaction and should be load-tested before high-volume deployment. Stale-resource checks page through resources at each configured interval. The security burst counter is in-memory and resets on restart or across replicas; no distributed correlation or external event broker is used.
+Phases 4–8 now include host collection, authenticated backend ingestion, deterministic threshold/staleness/security indicators, persisted alerts with lifecycle history, a role-aware dashboard, and optional TOTP MFA. The security burst and login/MFA throttles are in-memory and reset on restart or across replicas; no distributed correlation or external event broker is used. Recovery codes are not implemented. Platform sensor availability, real production accuracy, scale, and causal relationships have not been benchmarked. Metric threshold processing runs in the telemetry request transaction and should be load-tested before high-volume deployment. Stale-resource checks page through resources at each configured interval. Phase 9 live integration and Phase 10 research outcomes must be verified on a configured database and target host; see the evaluation protocol for reproducible measurements.

@@ -4,6 +4,7 @@ import com.cloudshield.backend.api.ApiError;
 import tools.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.Instant;
+import java.time.Clock;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -28,10 +29,29 @@ import org.springframework.security.web.context.HttpSessionSecurityContextReposi
 import org.springframework.security.web.context.SecurityContextRepository;
 import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.security.web.util.matcher.RequestMatcher;
+import org.springframework.security.web.header.writers.StaticHeadersWriter;
 
 @Configuration
 @EnableMethodSecurity
 public class SecurityConfiguration {
+    @Bean Clock cloudshieldClock() { return Clock.systemUTC(); }
+    @Bean org.springframework.security.web.csrf.CookieCsrfTokenRepository csrfTokenRepository(
+            @Value("${server.servlet.session.cookie.secure:false}") boolean secureCookie,
+            @Value("${cloudshield.session.cookie-same-site:Lax}") String cookieSameSite) {
+        String normalizedSameSite = switch (cookieSameSite.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "lax" -> "Lax";
+            case "strict" -> "Strict";
+            case "none" -> "None";
+            default -> throw new IllegalStateException("SESSION_COOKIE_SAME_SITE must be Lax, Strict, or None");
+        };
+        if ("None".equals(normalizedSameSite) && !secureCookie) {
+            throw new IllegalStateException("SESSION_COOKIE_SECURE=true is required when SESSION_COOKIE_SAME_SITE=None");
+        }
+        var repository = org.springframework.security.web.csrf.CookieCsrfTokenRepository.withHttpOnlyFalse();
+        repository.setCookiePath("/");
+        repository.setCookieCustomizer(cookie -> cookie.secure(secureCookie).sameSite(normalizedSameSite));
+        return repository;
+    }
     @Bean PasswordEncoder passwordEncoder() { return new BCryptPasswordEncoder(12); }
     @Bean SecurityContextRepository securityContextRepository() { return new HttpSessionSecurityContextRepository(); }
     @Bean FilterRegistrationBean<CurrentUserFilter> currentUserFilterRegistration(CurrentUserFilter filter) {
@@ -48,12 +68,13 @@ public class SecurityConfiguration {
 
     @Bean SecurityFilterChain securityFilterChain(HttpSecurity http, ObjectMapper mapper, DaoAuthenticationProvider provider,
             CurrentUserFilter currentUserFilter,
-            @Value("${cloudshield.probe.api-key:}") String probeKey) throws Exception {
-        var csrfRepository = CookieCsrfTokenRepository.withHttpOnlyFalse();
-        csrfRepository.setCookiePath("/");
+            @Value("${cloudshield.probe.api-key:}") String probeKey,
+            org.springframework.security.web.csrf.CookieCsrfTokenRepository csrfRepository) throws Exception {
         RequestMatcher heartbeatPost = PathPatternRequestMatcher.pathPattern(HttpMethod.POST, "/api/probe/heartbeat");
         RequestMatcher metricsPost = PathPatternRequestMatcher.pathPattern(HttpMethod.POST, "/api/probe/metrics");
         http
+            .headers(headers -> headers.addHeaderWriter(new StaticHeadersWriter("Referrer-Policy", "no-referrer"))
+                    .addHeaderWriter(new StaticHeadersWriter("Permissions-Policy", "camera=(), microphone=(), geolocation=()")))
             .csrf(csrf -> csrf.csrfTokenRepository(csrfRepository)
                     .csrfTokenRequestHandler(new CsrfTokenRequestAttributeHandler())
                     .ignoringRequestMatchers(request -> (heartbeatPost.matches(request) || metricsPost.matches(request)) && validProbeKey(request, probeKey)))
@@ -65,6 +86,8 @@ public class SecurityConfiguration {
             .authorizeHttpRequests(auth -> auth
                     .requestMatchers(HttpMethod.GET, "/api/health", "/api/probe/heartbeat", "/api/auth/csrf").permitAll()
                     .requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
+                    .requestMatchers(HttpMethod.POST, "/api/auth/mfa/challenge").permitAll()
+                    .requestMatchers("/api/auth/mfa/**").authenticated()
                     .requestMatchers(HttpMethod.POST, "/api/probe/heartbeat", "/api/probe/metrics").access((authentication, context) ->
                             new org.springframework.security.authorization.AuthorizationDecision(validProbeKey(context.getRequest(), probeKey)))
                     .requestMatchers("/api/auth/logout", "/api/auth/me").authenticated()

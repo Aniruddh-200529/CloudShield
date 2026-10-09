@@ -31,6 +31,9 @@ public class CurrentUserFilter extends OncePerRequestFilter {
                 return;
             }
             UserPrincipal refreshed = UserPrincipal.from(current.get());
+            if (!oldPrincipal.authorities().equals(refreshed.authorities()) && request.getSession(false) != null) {
+                request.changeSessionId();
+            }
             context.setAuthentication(new UsernamePasswordAuthenticationToken(refreshed, null, refreshed.authorities()));
         }
         chain.doFilter(request, response);

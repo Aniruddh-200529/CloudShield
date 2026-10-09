@@ -55,7 +55,7 @@ import org.springframework.boot.webmvc.test.autoconfigure.MockMvcPrint;
 import com.cloudshield.backend.api.*;
 
 @WebMvcTest(controllers = {HealthController.class, ProbeController.class, ResourceController.class,
-        ProbeMetricsController.class, MetricController.class, AuditEventController.class, AlertController.class, AuthController.class, AdminUserController.class})
+        ProbeMetricsController.class, MetricController.class, AuditEventController.class, AlertController.class, AuthController.class, MfaController.class, AdminUserController.class})
 @AutoConfigureMockMvc(print = MockMvcPrint.NONE)
 @Import({SecurityConfiguration.class, DatabaseUserDetailsService.class, CurrentUserFilter.class, WebConfiguration.class})
 class SecurityWebLayerTests {
@@ -76,12 +76,39 @@ class SecurityWebLayerTests {
     @MockitoBean AlertService alerts;
     @MockitoBean LoginAttemptLimiter loginLimiter;
     @MockitoBean SecurityAuditService securityAudit;
+    @MockitoBean com.cloudshield.backend.service.MfaService mfaService;
+    @MockitoBean com.cloudshield.backend.service.MfaAttemptLimiter mfaAttemptLimiter;
 
     @Test void unauthenticatedRequestsAreDeniedAndHealthRemainsPublic() throws Exception {
         mvc.perform(get("/api/health")).andExpect(status().isOk());
         mvc.perform(get("/api/probe/heartbeat")).andExpect(status().isOk());
         mvc.perform(get("/api/resources")).andExpect(status().isUnauthorized());
         mvc.perform(get("/api/auth/me")).andExpect(status().isUnauthorized());
+    }
+
+    @Test void securityHeadersAndCsrfCookieArePresentForLocalSessionMode() throws Exception {
+        mvc.perform(get("/api/health")).andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().string("Referrer-Policy", "no-referrer"))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().string("Permissions-Policy", "camera=(), microphone=(), geolocation=()"));
+        MvcResult csrfResult = mvc.perform(get("/api/auth/csrf")).andExpect(status().isOk()).andReturn();
+        var csrfCookie = csrfResult.getResponse().getCookie("XSRF-TOKEN");
+        var cookieHeaders = csrfResult.getResponse().getHeaders("Set-Cookie");
+        boolean headerCookiePresent = cookieHeaders.stream().anyMatch(value -> value.startsWith("XSRF-TOKEN="));
+        org.assertj.core.api.Assertions.assertThat(csrfCookie != null || headerCookiePresent).isTrue();
+        if (csrfCookie != null) {
+            org.assertj.core.api.Assertions.assertThat(csrfCookie.getPath()).isEqualTo("/");
+            org.assertj.core.api.Assertions.assertThat(csrfCookie.isHttpOnly()).isFalse();
+            org.assertj.core.api.Assertions.assertThat(csrfCookie.getSecure()).isFalse();
+            org.assertj.core.api.Assertions.assertThat(csrfCookie.getAttribute("SameSite")).isEqualTo("Lax");
+        }
+        if (csrfCookie == null && headerCookiePresent) {
+            String csrfHeader = cookieHeaders.stream().filter(value -> value.startsWith("XSRF-TOKEN=")).findFirst().orElseThrow();
+            String normalizedCookie = csrfHeader.toLowerCase(java.util.Locale.ROOT);
+            org.assertj.core.api.Assertions.assertThat(normalizedCookie.contains("path=/")).as("CSRF cookie path").isTrue();
+            org.assertj.core.api.Assertions.assertThat(normalizedCookie.contains("samesite=lax")).as("CSRF cookie SameSite").isTrue();
+            org.assertj.core.api.Assertions.assertThat(normalizedCookie.contains("httponly")).as("CSRF cookie must be readable by the API client").isFalse();
+            org.assertj.core.api.Assertions.assertThat(normalizedCookie.contains("; secure")).as("local CSRF cookie secure mode").isFalse();
+        }
     }
 
     @Test void viewerCanReadOperationalDataButCannotWriteOrAdminister() throws Exception {
@@ -138,15 +165,78 @@ class SecurityWebLayerTests {
         when(authenticationManager.authenticate(any())).thenReturn(authenticated);
         when(loginLimiter.allow(anyString())).thenReturn(true);
         String loginBody = "{\"username\":\"admin\",\"password\":\"" + UUID.randomUUID() + "\"}";
+        MockHttpSession initialSession = new MockHttpSession();
+        String priorSessionId = initialSession.getId();
 
-        MvcResult result = mvc.perform(post("/api/auth/login").with(csrf()).contentType("application/json").content(loginBody))
+        MvcResult result = mvc.perform(post("/api/auth/login").session(initialSession).with(csrf()).contentType("application/json").content(loginBody))
                 .andExpect(status().isOk()).andExpect(content().json("{\"username\":\"admin\",\"displayName\":\"CloudShield Admin\",\"role\":\"ADMIN\"}"))
                 .andReturn();
         MockHttpSession session = (MockHttpSession) result.getRequest().getSession(false);
         org.assertj.core.api.Assertions.assertThat(session).isNotNull();
+        org.assertj.core.api.Assertions.assertThat(session.getId()).isNotEqualTo(priorSessionId);
         mvc.perform(get("/api/auth/me").session(session)).andExpect(status().isOk())
                 .andExpect(content().json("{\"username\":\"admin\",\"displayName\":\"CloudShield Admin\",\"role\":\"ADMIN\"}"));
+        mvc.perform(post("/api/auth/logout").session(session).with(csrf())).andExpect(status().isNoContent());
+        org.assertj.core.api.Assertions.assertThat(session.isInvalid()).isTrue();
         verify(securityAudit).record(eq("LOGIN_SUCCESS"), eq("admin"), eq("admin"), eq("SUCCESS"), eq(Map.of()));
+    }
+
+    @Test void mfaLoginRequiresChallengeBeforeCreatingAuthenticatedSession() throws Exception {
+        UUID id = UUID.randomUUID();
+        UserAccount account = new UserAccount("mfa-user", "MFA User", "encoded-hash", UserRole.VIEWER);
+        ReflectionTestUtils.setField(account, "id", id);
+        UserPrincipal principal = UserPrincipal.from(account);
+        when(authenticationManager.authenticate(any())).thenReturn(new UsernamePasswordAuthenticationToken(principal, null, principal.authorities()));
+        when(loginLimiter.allow(anyString())).thenReturn(true);
+        when(mfaService.isMfaEnabled("mfa-user")).thenReturn(true);
+        when(mfaAttemptLimiter.allow(anyString())).thenReturn(true);
+        MvcResult login = mvc.perform(post("/api/auth/login").with(csrf()).contentType("application/json")
+                        .content("{\"username\":\"mfa-user\",\"password\":\"" + UUID.randomUUID() + "\"}"))
+                .andExpect(status().isAccepted()).andExpect(content().json("{\"mfaRequired\":true}"))
+                .andReturn();
+        MockHttpSession session = (MockHttpSession) login.getRequest().getSession(false);
+        org.assertj.core.api.Assertions.assertThat(session).isNotNull();
+        org.assertj.core.api.Assertions.assertThat(session.getAttribute(MfaController.CHALLENGE_USERNAME)).isEqualTo("mfa-user");
+        mvc.perform(get("/api/auth/me").session(session)).andExpect(status().isUnauthorized());
+
+        when(mfaService.verifyLoginCode("mfa-user", "123456")).thenReturn(true);
+        when(users.findByUsername("mfa-user")).thenReturn(Optional.of(account));
+        when(users.findById(id)).thenReturn(Optional.of(account));
+        mvc.perform(post("/api/auth/mfa/challenge").session(session).with(csrf()).contentType("application/json")
+                        .content("{\"code\":\"123456\"}"))
+                .andExpect(status().isOk()).andExpect(content().json("{\"username\":\"mfa-user\",\"role\":\"VIEWER\"}"));
+        mvc.perform(get("/api/auth/me").session(session)).andExpect(status().isOk());
+        org.assertj.core.api.Assertions.assertThat(session.getAttribute(MfaController.CHALLENGE_USERNAME)).isNull();
+    }
+
+    @Test void mfaChallengeRequiresCsrfAndRejectsMissingChallengeSession() throws Exception {
+        when(mfaAttemptLimiter.allow(anyString())).thenReturn(true);
+        mvc.perform(post("/api/auth/mfa/challenge").contentType("application/json").content("{\"code\":\"123456\"}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/auth/mfa/challenge").with(csrf()).contentType("application/json").content("{\"code\":\"123456\"}"))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/auth/mfa/status")).andExpect(status().isUnauthorized());
+        mvc.perform(post("/api/auth/mfa/enrollment").with(csrf())).andExpect(status().isUnauthorized());
+    }
+
+    @Test void invalidMfaCodeIsGenericAndAuditedWithoutRecordingTheCode() throws Exception {
+        UserAccount account = new UserAccount("mfa-user", "MFA User", "encoded-hash", UserRole.VIEWER);
+        UserPrincipal principal = UserPrincipal.from(account);
+        when(authenticationManager.authenticate(any())).thenReturn(new UsernamePasswordAuthenticationToken(principal, null, principal.authorities()));
+        when(loginLimiter.allow(anyString())).thenReturn(true);
+        when(mfaService.isMfaEnabled("mfa-user")).thenReturn(true);
+        when(mfaAttemptLimiter.allow(anyString())).thenReturn(true);
+        when(mfaService.verifyLoginCode("mfa-user", "000000")).thenReturn(false);
+        MvcResult login = mvc.perform(post("/api/auth/login").with(csrf()).contentType("application/json")
+                        .content("{\"username\":\"mfa-user\",\"password\":\"test-only-password\"}"))
+                .andExpect(status().isAccepted()).andReturn();
+        MockHttpSession session = (MockHttpSession) login.getRequest().getSession(false);
+        mvc.perform(post("/api/auth/mfa/challenge").session(session).with(csrf()).contentType("application/json")
+                        .content("{\"code\":\"000000\"}"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(content().string(org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("000000"))))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("Invalid verification code")));
+        verify(securityAudit).record(eq("MFA_LOGIN_FAILURE"), eq("mfa-user"), eq("mfa-user"), eq("FAILURE"), any());
     }
 
     @Test void invalidLoginIsGenericAndRateLimitRejectsBeforeAuthentication() throws Exception {
@@ -171,8 +261,11 @@ class SecurityWebLayerTests {
         UserPrincipal principal = new UserPrincipal(id, "admin", "Old display name", "encoded-hash", true,
                 List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_VIEWER")));
         var auth = new UsernamePasswordAuthenticationToken(principal, null, principal.authorities());
-        mvc.perform(get("/api/auth/me").with(authentication(auth)))
+        org.springframework.mock.web.MockHttpSession session = new org.springframework.mock.web.MockHttpSession();
+        String priorSessionId = session.getId();
+        mvc.perform(get("/api/auth/me").session(session).with(authentication(auth)))
                 .andExpect(status().isOk()).andExpect(content().json("{\"id\":\"" + id + "\",\"username\":\"admin\",\"displayName\":\"CloudShield Admin\",\"role\":\"ADMIN\",\"enabled\":true}"));
+        org.assertj.core.api.Assertions.assertThat(session.getId()).isNotEqualTo(priorSessionId);
     }
 
     @Test void probeKeyOnlyAuthorizesHeartbeatPostAndCannotReadProtectedRoutes() throws Exception {

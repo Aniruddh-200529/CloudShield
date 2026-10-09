@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, refreshCsrf } from "./api";
 import MonitoringDashboard from "./MonitoringDashboard";
+import MfaPanel from "./MfaPanel";
+import AuditEvents from "./AuditEvents";
 import "./App.css";
 
 function App() {
@@ -12,6 +14,8 @@ function App() {
   const [users, setUsers] = useState([]);
   const [tab, setTab] = useState("overview");
   const [busy, setBusy] = useState(false);
+  const [mfaChallenge, setMfaChallenge] = useState(false);
+  const [mfaCode, setMfaCode] = useState("");
 
   const loadSession = useCallback(async () => {
     try { setUser(await api("/api/auth/me")); } catch { setUser(null); }
@@ -31,7 +35,17 @@ function App() {
 
   async function signIn(event) {
     event.preventDefault(); setError(""); setBusy(true);
-    try { await api("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }); setPassword(""); await refreshCsrf(); await loadSession(); }
+    try {
+      const result = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
+      setPassword("");
+      if (result.mfaRequired) { setMfaChallenge(true); await refreshCsrf(); }
+      else { await refreshCsrf(); await loadSession(); }
+    }
+    catch (e) { setError(e.message); } finally { setBusy(false); }
+  }
+  async function completeMfa(event) {
+    event.preventDefault(); setError(""); setBusy(true);
+    try { await api("/api/auth/mfa/challenge", { method: "POST", body: JSON.stringify({ code: mfaCode }) }); setMfaCode(""); setMfaChallenge(false); await refreshCsrf(); await loadSession(); }
     catch (e) { setError(e.message); } finally { setBusy(false); }
   }
   async function signOut() {
@@ -44,15 +58,23 @@ function App() {
     try { await api("/api/admin/users", { method: "POST", body: JSON.stringify(Object.fromEntries(form)) }); event.currentTarget.reset(); setUsers(await api("/api/admin/users")); }
     catch (e) { setError(e.message); }
   }
+  async function updateUser(id, path, body) {
+    setError("");
+    try { await api(`/api/admin/users/${id}${path}`, { method: "PATCH", body: JSON.stringify(body) }); setUsers(await api("/api/admin/users")); }
+    catch (e) { setError(e.message); }
+  }
 
   if (!user) return <main className="auth-shell"><section className="login-card">
     <div className="brand-mark">CS</div><p className="eyebrow">CLOUD INFRASTRUCTURE</p><h1>Welcome back</h1><p className="muted">Sign in to your CloudShield workspace.</p>
     {error && <div className="notice error" role="alert">{error}</div>}
-    <form onSubmit={signIn} className="stack">
+    {mfaChallenge ? <><h2>Verify your identity</h2><p className="muted">Enter the current code from your authenticator app.</p><form onSubmit={completeMfa} className="stack">
+      <label>6-digit authenticator code<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength="6" value={mfaCode} onChange={(e) => setMfaCode(e.target.value)} required /></label>
+      <button disabled={busy || mfaCode.length !== 6}>{busy ? "Verifying…" : "Verify and sign in"}</button>
+    </form><button className="quiet-button" onClick={() => { setMfaChallenge(false); setMfaCode(""); setError(""); }}>Back to sign in</button></> : <form onSubmit={signIn} className="stack">
       <label>Username<input autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} required /></label>
       <label>Password<input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
       <button disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
-    </form><div className="backend-state"><span className={health.includes("running") ? "dot online" : "dot"} />{health}</div>
+    </form>}<div className="backend-state"><span className={health.includes("running") ? "dot online" : "dot"} />{health}</div>
   </section></main>;
 
   return <div className="app-shell"><aside className="sidebar">
@@ -60,15 +82,19 @@ function App() {
     <nav aria-label="Main navigation">
       <button className={tab === "overview" ? "nav-item active" : "nav-item"} onClick={() => setTab("overview")}>◈ <span>Overview</span></button>
       {user.role === "ADMIN" && <button className={tab === "users" ? "nav-item active" : "nav-item"} onClick={() => setTab("users")}>♙ <span>User access</span></button>}
+      {(user.role === "ADMIN" || user.role === "DEVOPS") && <button className={tab === "audit" ? "nav-item active" : "nav-item"} onClick={() => setTab("audit")}>▤ <span>Audit history</span></button>}
+      <button className={tab === "security" ? "nav-item active" : "nav-item"} onClick={() => setTab("security")}>◇ <span>Security</span></button>
     </nav><div className="sidebar-foot"><span className="dot online" />{health}</div>
   </aside><main className="main-panel">
-    <header className="topbar"><div><p className="eyebrow">CLOUDSHIELD / {tab === "users" ? "ACCESS" : "MONITORING"}</p><h1>{tab === "users" ? "User access" : "Monitoring"}</h1></div>
+    <header className="topbar"><div><p className="eyebrow">CLOUDSHIELD / {tab.toUpperCase()}</p><h1>{{ overview: "Monitoring", users: "User access", audit: "Audit history", security: "Account security" }[tab]}</h1></div>
       <div className="profile"><div className="avatar">{user.displayName?.slice(0, 1).toUpperCase()}</div><div><strong>{user.displayName}</strong><span>{user.role}</span></div><button className="quiet-button" onClick={signOut}>Sign out</button></div>
     </header>
     {error && <div className="notice error" role="alert">{error}</div>}
-    {tab === "overview" ? <MonitoringDashboard role={user.role} /> : <section className="users-layout">
+    {tab === "overview" ? <MonitoringDashboard role={user.role} /> : tab === "audit" ? <AuditEvents /> : tab === "security" ? <MfaPanel /> : <section className="users-layout">
       <article className="panel"><p className="eyebrow">DIRECTORY</p><h2>People and roles</h2><div className="user-list">{users.map((person) => <div className="user-row" key={person.id}>
-        <div className="avatar small">{person.displayName.slice(0, 1).toUpperCase()}</div><div className="user-info"><strong>{person.displayName}</strong><span>{person.username} · {person.enabled ? "Enabled" : "Disabled"}</span></div><span className="role-pill">{person.role}</span>
+        <div className="avatar small">{person.displayName.slice(0, 1).toUpperCase()}</div><div className="user-info"><strong>{person.displayName}</strong><span>{person.username} · {person.enabled ? "Enabled" : "Disabled"}</span></div>
+        <select aria-label={`Role for ${person.username}`} value={person.role} onChange={(event) => updateUser(person.id, "/role", { role: event.target.value })}><option>VIEWER</option><option>DEVOPS</option><option>ADMIN</option></select>
+        <button className="quiet-button" onClick={() => updateUser(person.id, "/enabled", { enabled: !person.enabled })}>{person.enabled ? "Disable" : "Enable"}</button>
       </div>)}</div></article>
       <article className="panel create-panel"><p className="eyebrow">NEW ACCOUNT</p><h2>Provision a user</h2><form className="stack" onSubmit={createUser}>
         <label>Username<input name="username" required maxLength="80" /></label><label>Display name<input name="displayName" required maxLength="120" /></label>

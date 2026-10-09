@@ -2,6 +2,7 @@ package com.cloudshield.backend.api;
 
 import com.cloudshield.backend.service.ConflictException;
 import com.cloudshield.backend.service.NotFoundException;
+import com.cloudshield.backend.service.MfaConfigurationException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import java.time.Instant;
@@ -21,6 +22,8 @@ import org.springframework.web.method.annotation.MethodArgumentTypeMismatchExcep
 public class ApiExceptionHandler {
     @ExceptionHandler(NotFoundException.class)
     ResponseEntity<ApiError> notFound(NotFoundException ex, HttpServletRequest request) { return response(HttpStatus.NOT_FOUND, ex.getMessage(), request, Map.of()); }
+    @ExceptionHandler(MfaConfigurationException.class)
+    ResponseEntity<ApiError> mfaConfiguration(MfaConfigurationException ex, HttpServletRequest request) { return response(HttpStatus.SERVICE_UNAVAILABLE, "MFA is unavailable because its encryption configuration is missing or invalid", request, Map.of()); }
     @ExceptionHandler({ConflictException.class, DataIntegrityViolationException.class})
     ResponseEntity<ApiError> conflict(RuntimeException ex, HttpServletRequest request) { return response(HttpStatus.CONFLICT, ex instanceof ConflictException ? ex.getMessage() : "The request conflicts with existing data or a related record", request, Map.of()); }
     @ExceptionHandler(IllegalArgumentException.class)
