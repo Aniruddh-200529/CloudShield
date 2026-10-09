@@ -10,18 +10,22 @@ import static org.mockito.Mockito.when;
 
 import com.cloudshield.backend.api.MetricRequest;
 import com.cloudshield.backend.api.ResourceRequest;
+import com.cloudshield.backend.api.AuditEventRequest;
 import com.cloudshield.backend.domain.MonitoredResource;
 import com.cloudshield.backend.domain.AlertRecord;
 import com.cloudshield.backend.repository.MetricSampleRepository;
+import com.cloudshield.backend.repository.AuditEventRepository;
 import com.cloudshield.backend.repository.MonitoredResourceRepository;
 import com.cloudshield.backend.service.ConflictException;
 import com.cloudshield.backend.service.MetricService;
+import com.cloudshield.backend.service.AuditEventService;
 import com.cloudshield.backend.service.NotFoundException;
 import com.cloudshield.backend.service.ResourceService;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.Map;
 import jakarta.validation.Validation;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.domain.PageRequest;
@@ -89,5 +93,17 @@ class PhaseTwoServiceTests {
     @Test
     void retainsPhaseOneHealthResponse() {
         assertThat(new HealthController().health()).isEqualTo("CloudShield backend is running");
+    }
+
+    @Test
+    void rejectsSensitiveFieldsInNestedCustomAuditDetailsBeforePersistence() {
+        AuditEventRepository events = mock(AuditEventRepository.class);
+        AuditEventService service = new AuditEventService(events, new ResourceService(resources));
+        AuditEventRequest request = new AuditEventRequest("OPERATOR_EVENT", "operator", null, null, null, "SUCCESS",
+                Map.of("context", Map.of("api-token", "test-value")));
+
+        assertThatThrownBy(() -> service.record(request)).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Audit details cannot contain sensitive fields");
+        verify(events, org.mockito.Mockito.never()).save(any());
     }
 }

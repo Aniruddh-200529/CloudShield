@@ -5,6 +5,7 @@
 # Java
 target/
 *.class
+backend/effective-pom
 
 # Node / React
 node_modules/

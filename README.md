@@ -101,13 +101,40 @@ Update the returned alert ID with `PATCH /api/alerts/{id}/status` and a body suc
 
 Errors use a consistent JSON shape with `timestamp`, `status`, `error`, `message`, `path`, and `validationErrors`. Validation errors are `400`, missing records are `404`, duplicate identifiers and data/foreign-key conflicts are `409`. Unexpected server errors return a generic message without SQL details, stack traces, or credentials.
 
+## Phase 3 authentication and authorization
+
+Flyway V2 adds persistent user accounts. V1 is unchanged. Passwords are stored with BCrypt hashes; user API responses never include password data. There is no public registration endpoint. On first startup, configure `BOOTSTRAP_ADMIN_USERNAME` and `BOOTSTRAP_ADMIN_PASSWORD`; startup creates that administrator once. The bootstrap settings are ignored after an enabled ADMIN exists and never overwrite an existing account. Use a unique, randomly generated password of at least 14 characters. If no enabled administrator exists and bootstrap settings are absent or invalid, backend startup stops with an actionable error.
+
+The backend uses server-side HTTP sessions (`JSESSIONID`, HttpOnly, 30-minute idle timeout), CSRF tokens (`XSRF-TOKEN` cookie and `X-XSRF-TOKEN` header), and credentialed CORS restricted to `http://localhost:5173`. Login and logout are CSRF-protected too. Production deployments must use HTTPS and set `SESSION_COOKIE_SECURE=true`; configure TLS at the application or trusted reverse proxy. The frontend sends credentials and CSRF headers and keeps no password or access token in browser storage.
+
+| Method | Endpoint | Access | Request / behavior |
+|---|---|---|---|
+| GET | `/api/auth/csrf` | Public | Returns `headerName` and a CSRF `token`; the CSRF cookie is also set. |
+| POST | `/api/auth/login` | Public + CSRF | `{"username":"operator","password":"..."}`; creates a session and returns the current user DTO. Invalid credentials return a generic 401. |
+| GET | `/api/auth/me` | Signed in | Returns `id`, `username`, `displayName`, and `role`. |
+| POST | `/api/auth/logout` | Signed in + CSRF | Invalidates the session and clears the CSRF cookie. |
+| GET | `/api/admin/users` | ADMIN | Lists users without password hashes. |
+| POST | `/api/admin/users` | ADMIN + CSRF | `{"username":"viewer1","displayName":"Viewer One","password":"<unique-random-password-of-at-least-14-characters>","role":"VIEWER"}`. Roles: `ADMIN`, `DEVOPS`, `VIEWER`. |
+| PATCH | `/api/admin/users/{id}` | ADMIN + CSRF | `{"displayName":"Updated Name"}`. |
+| PATCH | `/api/admin/users/{id}/role` | ADMIN + CSRF | `{"role":"DEVOPS"}`. Administrators cannot change their own role. |
+| PATCH | `/api/admin/users/{id}/enabled` | ADMIN + CSRF | `{"enabled":false}`. Administrators cannot disable themselves, and the last enabled ADMIN cannot be demoted or disabled. |
+
+ADMIN can manage users and access the resource, metric, heartbeat history, alert, and audit APIs, including resource deletion. DEVOPS can read the same operational history except user administration, and can create/update resources, submit metrics, create/update alerts, and read audit events; DEVOPS cannot delete resources. VIEWER can read resources, metrics, heartbeat history, and alerts. VIEWER cannot read audit events or perform mutations. All routes default to deny. Existing `GET /api/health` and `GET /api/probe/heartbeat` stay public for liveness compatibility.
+
+The probe submits only `POST /api/probe/heartbeat` using the shared `X-Probe-Key` header. Set the same high-entropy `PROBE_API_KEY` for the backend and probe; the backend compares it in constant time. The key is never returned by an API. The probe cannot access heartbeat history or any other endpoint. Do not expose this service key in frontend configuration. Login attempts are rate-limited per source IP in the running backend process; this in-memory limit is not shared across multiple backend replicas.
+
+Authentication successes/failures, logout, and user provisioning/role/enabled changes are recorded in `audit_events`. These security audit writes do not include passwords, cookies, or service keys. Failed login responses do not reveal whether a username exists. MFA, external identity federation, and distributed rate limiting are not part of Phase 3.
+
 ### Local setup and commands (Windows PowerShell)
 
 1. Start the local PostgreSQL service. Create the `cloudshield` database if needed. Do not point these commands at another database.
-2. Ensure `JAVA_HOME` points to a Java 21 JDK (the Maven Wrapper uses `JAVA_HOME` when it is set). Set the password for the configured `postgres` database user in the current PowerShell session. The prompt masks input and the value is not written to disk:
+2. Ensure `JAVA_HOME` points to a Java 21 JDK (the Maven Wrapper uses `JAVA_HOME` when it is set). Set the PostgreSQL password and initial bootstrap settings in the current PowerShell session. The password prompts are masked and are not written to disk. Configure bootstrap values only for the first startup, and set a strong one-time administrator password:
 
    ```powershell
    $env:DB_PASSWORD = Read-Host -Prompt "PostgreSQL password" -MaskInput
+   $env:BOOTSTRAP_ADMIN_USERNAME = "cloudshield-admin"
+   $env:BOOTSTRAP_ADMIN_PASSWORD = Read-Host -Prompt "Initial CloudShield admin password" -MaskInput
+   $env:PROBE_API_KEY = Read-Host -Prompt "Probe service key" -MaskInput
    ```
 
 3. Inspect/apply migrations and run the backend:
@@ -116,11 +143,21 @@ Errors use a consistent JSON shape with `timestamp`, `status`, `error`, `message
    Set-Location .\backend
    .\mvnw.cmd flyway:info
    .\mvnw.cmd flyway:migrate
-   .\mvnw.cmd test
+   .\mvnw.cmd verify
    .\mvnw.cmd spring-boot:run
    ```
 
    Flyway also runs automatically on application startup. The migration command only targets the `cloudshield` database URL configured in the backend Maven plugin. Keep `DB_PASSWORD` set in the same PowerShell session.
+
+   The probe has its own test command, and the frontend can be checked separately:
+
+   ```powershell
+   Set-Location ..\probe
+   .\mvnw.cmd test
+   Set-Location ..\frontend
+   npm run lint
+   npm run build
+   ```
 
 4. In a second PowerShell window, start the probe after the backend is running:
 
@@ -129,7 +166,7 @@ Errors use a consistent JSON shape with `timestamp`, `status`, `error`, `message
    .\mvnw.cmd spring-boot:run
    ```
 
-5. The frontend runs at `http://localhost:5173` and calls the backend at `http://localhost:8080`. The backend allows the existing frontend origin. The probe listens on `http://localhost:8081`.
+5. The frontend runs at `http://localhost:5173` and calls the backend at `http://localhost:8080`. Sign in with the bootstrap admin account, then use the ADMIN user access view to provision role-limited accounts. The backend allows this frontend origin. The probe listens on `http://localhost:8081` and requires the same `PROBE_API_KEY` as the backend.
 
 To verify stored data, use `psql` and enter the database password at its prompt:
 
@@ -143,4 +180,6 @@ psql -h localhost -p 5432 -U postgres -d cloudshield -c "SELECT probe_identifier
 
 `mvn test` runs service unit tests and PostgreSQL-backed API integration tests using Testcontainers with PostgreSQL 16. Integration tests are automatically skipped when Docker is unavailable; a successful Maven build with skipped integration tests does not verify actual migration or database persistence. Run with Docker available to exercise Flyway, Hibernate validation, endpoint behavior, and persistence against PostgreSQL.
 
-These Phase 2 APIs are temporarily unauthenticated for local development. Authentication/authorization, role enforcement, MFA, metric collectors, automated event correlation, alert evaluation/background processing, and dashboard redesign are deferred. The database tables provide foundations only; those later features are not implemented by their existence.
+The probe test configuration loads Mockito as a JVM startup agent for Surefire. This avoids a Windows native `javatool` attach-pipe failure observed when Mockito attempted dynamic agent loading. The test resource disables the heartbeat runner, so the context-load test does not contact the backend. Use the configured Java 21 JDK for the probe test command.
+
+Phase 3 provides session authentication and backend role enforcement. MFA, metric collectors, automated event correlation, alert evaluation/background processing, and a broader monitoring dashboard remain out of scope. The frontend provides sign-in, role-aware navigation, session status, and basic ADMIN user provisioning; the rest of the operational APIs are usable by authenticated clients under the role matrix above.

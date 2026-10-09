@@ -13,12 +13,15 @@ public class ProbeHeartbeat implements CommandLineRunner {
     private final RestClient restClient;
     private final String backendUrl;
     private final String probeIdentifier;
+    private final String probeApiKey;
 
     public ProbeHeartbeat(@Value("${cloudshield.backend.url:http://localhost:8080}") String backendUrl,
-            @Value("${cloudshield.probe.identifier:local-probe}") String probeIdentifier) {
+            @Value("${cloudshield.probe.identifier:local-probe}") String probeIdentifier,
+            @Value("${cloudshield.probe.api-key:}") String probeApiKey) {
         this.restClient = RestClient.create();
         this.backendUrl = backendUrl;
         this.probeIdentifier = probeIdentifier;
+        this.probeApiKey = probeApiKey;
     }
 
     @Override
@@ -27,6 +30,7 @@ public class ProbeHeartbeat implements CommandLineRunner {
         String response = restClient
                 .post()
                 .uri(backendUrl + "/api/probe/heartbeat")
+                .header("X-Probe-Key", probeApiKey)
                 .body(java.util.Map.of("probeIdentifier", probeIdentifier, "status", "HEALTHY",
                         "healthMessage", "Probe process started"))
                 .retrieve()
