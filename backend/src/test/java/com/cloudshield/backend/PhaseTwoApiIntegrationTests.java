@@ -71,6 +71,14 @@ class PhaseTwoApiIntegrationTests {
         assertThat(post("/api/resources/" + resourceId + "/metrics", """
                 {"metricType":"cpu.utilization","value":60.0,"unit":"percent","collectedAt":"%s"}
                 """.formatted(newTime)).statusCode()).isEqualTo(201);
+        JsonNode unfilteredMetrics = mapper.readTree(get("/api/resources/" + resourceId + "/metrics").body());
+        assertThat(unfilteredMetrics).hasSize(2);
+        JsonNode fromOnlyMetrics = mapper.readTree(get("/api/resources/" + resourceId + "/metrics?from=" + newTime).body());
+        assertThat(fromOnlyMetrics).hasSize(1);
+        assertThat(fromOnlyMetrics.get(0).get("value").asDouble()).isEqualTo(60.0);
+        JsonNode toOnlyMetrics = mapper.readTree(get("/api/resources/" + resourceId + "/metrics?to=" + oldTime).body());
+        assertThat(toOnlyMetrics).hasSize(1);
+        assertThat(toOnlyMetrics.get(0).get("value").asDouble()).isEqualTo(42.5);
         JsonNode filteredMetrics = mapper.readTree(get("/api/resources/" + resourceId + "/metrics?from=" + newTime + "&to=2026-03-01T00:00:00Z").body());
         assertThat(filteredMetrics).hasSize(1);
         assertThat(filteredMetrics.get(0).get("value").asDouble()).isEqualTo(60.0);
@@ -145,13 +153,66 @@ class PhaseTwoApiIntegrationTests {
         assertThat(get("/api/audit-events?limit=500").body()).contains("ALERT_CREATED", "ALERT_AUTO_RESOLVED", alertId);
     }
 
+    @Test
+    void probeCredentialSubmitsAndPersistsHeartbeatAndMetricsAndRejectsInvalidRequests() throws Exception {
+        String identifier = "probe-e2e-" + UUID.randomUUID();
+        var created = post("/api/resources", """
+                {"resourceIdentifier":"%s","name":"Probe integration host","resourceType":"HOST","status":"ACTIVE"}
+                """.formatted(identifier));
+        assertThat(created.statusCode()).isEqualTo(201);
+        String resourceId = mapper.readTree(created.body()).get("id").asText();
+        String probe = "probe-" + UUID.randomUUID();
+
+        HttpClient probeClient = HttpClient.newHttpClient();
+        HttpResponse<String> heartbeat = probeClient.send(HttpRequest.newBuilder(uri("/api/probe/heartbeat"))
+                .header("Content-Type", "application/json").header("X-Probe-Key", TEST_PROBE_KEY)
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"probeIdentifier":"%s","resourceIdentifier":"%s","status":"HEALTHY"}
+                        """.formatted(probe, identifier))).build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(heartbeat.statusCode()).isEqualTo(201);
+
+        HttpResponse<String> unknownHeartbeat = probeClient.send(HttpRequest.newBuilder(uri("/api/probe/heartbeat"))
+                .header("Content-Type", "application/json").header("X-Probe-Key", TEST_PROBE_KEY)
+                .POST(HttpRequest.BodyPublishers.ofString("""
+                        {"probeIdentifier":"%s","resourceIdentifier":"missing-%s","status":"HEALTHY"}
+                        """.formatted(probe, UUID.randomUUID()))).build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(unknownHeartbeat.statusCode()).isEqualTo(404);
+        assertThat(unknownHeartbeat.body()).contains("\"message\":\"Resource not found\"");
+
+        String metricBody = telemetryBody(probe, identifier, UUID.randomUUID().toString(), 37.5, java.time.Instant.now());
+        HttpResponse<String> metric = postProbeMetrics(metricBody);
+        assertThat(metric.statusCode()).isEqualTo(200).as(metric.body());
+        assertThat(metric.body()).contains("\"accepted\":1", "\"duplicates\":0");
+
+        // Read through authenticated history endpoints to prove rows were stored, not just accepted.
+        assertThat(get("/api/probe/heartbeats?probeIdentifier=" + probe).body()).contains(resourceId, probe);
+        assertThat(get("/api/resources/" + resourceId + "/metrics?limit=10").body()).contains("cpu.utilization", "37.5");
+
+        HttpResponse<String> invalidKey = sendProbeMetrics(probeClient, metricBody, UUID.randomUUID().toString());
+        assertThat(invalidKey.statusCode()).isEqualTo(403);
+
+        HttpResponse<String> unknownResource = sendProbeMetrics(probeClient,
+                telemetryBody(probe, "missing-" + UUID.randomUUID(), UUID.randomUUID().toString(), 10, java.time.Instant.now()),
+                TEST_PROBE_KEY);
+        assertThat(unknownResource.statusCode()).isEqualTo(404);
+
+        HttpResponse<String> invalidMetric = sendProbeMetrics(probeClient,
+                """
+                {"probeIdentifier":"%s","resourceIdentifier":"%s","observations":[{"observationId":"%s","metricType":"cpu.utilization","value":101,"unit":"percent","collectedAt":"%s"}]}
+                """.formatted(probe, identifier, UUID.randomUUID(), java.time.Instant.now()), TEST_PROBE_KEY);
+        assertThat(invalidMetric.statusCode()).isEqualTo(400);
+    }
+
     private String telemetryBody(String probe, String resource, String observationId, double value, java.time.Instant at) {
         return """
                 {"probeIdentifier":"%s","resourceIdentifier":"%s","observations":[{"observationId":"%s","metricType":"CPU_UTILIZATION","value":%s,"unit":"percent","collectedAt":"%s"}]}
                 """.formatted(probe, resource, observationId, value, at);
     }
     private HttpResponse<String> postProbeMetrics(String body) throws Exception {
-        return HttpClient.newHttpClient().send(HttpRequest.newBuilder(uri("/api/probe/metrics")).header("Content-Type", "application/json").header("X-Probe-Key", TEST_PROBE_KEY).POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
+        return sendProbeMetrics(HttpClient.newHttpClient(), body, TEST_PROBE_KEY);
+    }
+    private HttpResponse<String> sendProbeMetrics(HttpClient probeClient, String body, String key) throws Exception {
+        return probeClient.send(HttpRequest.newBuilder(uri("/api/probe/metrics")).header("Content-Type", "application/json").header("X-Probe-Key", key).POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString());
     }
 
     @Test

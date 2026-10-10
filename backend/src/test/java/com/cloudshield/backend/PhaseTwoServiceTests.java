@@ -57,7 +57,7 @@ class PhaseTwoServiceTests {
                 .isInstanceOf(NotFoundException.class);
         assertThatThrownBy(() -> metricService.history(resourceId, Instant.parse("2026-02-01T00:00:00Z"),
                 Instant.parse("2026-01-01T00:00:00Z"), 100)).isInstanceOf(NotFoundException.class);
-        verify(metrics, org.mockito.Mockito.never()).findHistory(eq(resourceId), any(), any(), any());
+        verify(metrics, org.mockito.Mockito.never()).findByResource_IdOrderByCollectedAtDesc(eq(resourceId), any());
     }
 
     @Test
@@ -68,12 +68,31 @@ class PhaseTwoServiceTests {
         MetricSampleRepository metrics = mock(MetricSampleRepository.class);
         Instant from = Instant.parse("2026-01-01T00:00:00Z");
         Instant to = Instant.parse("2026-02-01T00:00:00Z");
-        when(metrics.findHistory(eq(resourceId), eq(from), eq(to), any(PageRequest.class))).thenReturn(List.of());
+        when(metrics.findByResource_IdAndCollectedAtBetweenOrderByCollectedAtDesc(eq(resourceId), eq(from), eq(to), any(PageRequest.class))).thenReturn(List.of());
         MetricService service = new MetricService(metrics, new ResourceService(resources));
         assertThat(service.history(resourceId, from, to, 50)).isEmpty();
-        verify(metrics).findHistory(eq(resourceId), eq(from), eq(to), eq(PageRequest.of(0, 50)));
+        verify(metrics).findByResource_IdAndCollectedAtBetweenOrderByCollectedAtDesc(eq(resourceId), eq(from), eq(to), eq(PageRequest.of(0, 50)));
         assertThatThrownBy(() -> service.history(resourceId, to, from, 50)).isInstanceOf(IllegalArgumentException.class);
-        verify(metrics, org.mockito.Mockito.times(1)).findHistory(eq(resourceId), any(), any(), any());
+        verify(metrics, org.mockito.Mockito.times(1)).findByResource_IdAndCollectedAtBetweenOrderByCollectedAtDesc(eq(resourceId), any(), any(), any());
+    }
+
+    @Test
+    void metricHistoryUsesOnlyPresentNullableTimeFilters() {
+        UUID resourceId = UUID.randomUUID();
+        MonitoredResource resource = new MonitoredResource("vm-3", "VM three", "VM", null, null, "ACTIVE");
+        when(resources.findById(resourceId)).thenReturn(Optional.of(resource));
+        MetricSampleRepository metrics = mock(MetricSampleRepository.class);
+        MetricService service = new MetricService(metrics, new ResourceService(resources));
+        Instant from = Instant.parse("2026-01-01T00:00:00Z");
+        Instant to = Instant.parse("2026-02-01T00:00:00Z");
+
+        service.history(resourceId, null, null, 25);
+        service.history(resourceId, from, null, 25);
+        service.history(resourceId, null, to, 25);
+
+        verify(metrics).findByResource_IdOrderByCollectedAtDesc(resourceId, PageRequest.of(0, 25));
+        verify(metrics).findByResource_IdAndCollectedAtGreaterThanEqualOrderByCollectedAtDesc(resourceId, from, PageRequest.of(0, 25));
+        verify(metrics).findByResource_IdAndCollectedAtLessThanEqualOrderByCollectedAtDesc(resourceId, to, PageRequest.of(0, 25));
     }
 
     @Test

@@ -181,29 +181,53 @@ Alert list returns a JSON array compatible with existing clients: `GET /api/aler
 
 ## Local probe configuration
 
-Keep the probe credential only in the backend and probe process environments. Do not place it in Vite variables. Example PowerShell setup uses a masked prompt and non-secret identifiers:
+### One-command Windows demo
+
+Prerequisites: Windows PowerShell 5.1 or PowerShell 7+, Java 21, PostgreSQL running locally with the existing `cloudshield` database and V1–V4 already applied, `psql` on `PATH`, and Node.js/npm. The script prompts in the terminal for missing database/probe credentials using masked input. It reads Flyway status but never migrates automatically, selects an existing resource, packages and starts backend/probe/frontend, waits for rows persisted by that unique probe run, and stops only the processes it started when you press `Ctrl+C`. It will refuse to use occupied application ports or a different database. It may run `npm ci` if frontend dependencies are absent.
+
+From the repository root, run:
 
 ```powershell
-$env:PROBE_API_KEY = Read-Host -Prompt "Probe service key" -MaskInput
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Start-CloudShieldDemo.ps1
+```
+
+PowerShell 7 users can run the same script with `pwsh.exe` instead.
+
+If no enabled administrator exists, it securely prompts for first-time bootstrap credentials. If an enabled MFA account exists and its key is missing from the process environment, it prompts for the configured MFA encryption key. Sign in through the dashboard using the existing administrator account; the script does not print or store account credentials.
+
+Keep the probe credential only in the backend and probe process environments. Do not place it in Vite variables. This masked-input helper works in Windows PowerShell 5.1 and PowerShell 7; use it for secret values and enter only non-secret identifiers directly:
+
+```powershell
+function Set-MaskedEnvironmentVariable([string]$Name, [string]$Prompt) {
+    $secure = Read-Host -Prompt $Prompt -AsSecureString
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { [Environment]::SetEnvironmentVariable($Name, [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer), 'Process') }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer); $secure.Dispose() }
+}
+Set-MaskedEnvironmentVariable 'PROBE_API_KEY' 'Probe service key'
 $env:CLOUDSHIELD_BACKEND_URL = "http://localhost:8080"
 $env:CLOUDSHIELD_PROBE_IDENTIFIER = "local-probe"
-$env:CLOUDSHIELD_RESOURCE_IDENTIFIER = "host-local"
+$env:CLOUDSHIELD_RESOURCE_IDENTIFIER = "<exact existing resource_identifier from cloudshield>"
 $env:CLOUDSHIELD_PROBE_COLLECTION_INTERVAL_MS = "30000"
 ```
 
 Spring maps these to `cloudshield.backend.url`, `cloudshield.probe.identifier`, `cloudshield.probe.resource-identifier`, and `cloudshield.probe.collection-interval-ms`. The probe requires a nonblank API key and interval from 1 second to 1 hour. It starts collection immediately, then waits one interval between completed cycles. Its port remains 8081 for compatibility but it does not expose a public telemetry read API.
 
+Do not rely on the probe's default resource identifier for a live demo unless that exact identifier exists in `monitored_resources`. Query the existing database and copy one identifier exactly into `CLOUDSHIELD_RESOURCE_IDENTIFIER`. The same `PROBE_API_KEY` must be set independently in both backend and probe terminals because PowerShell environment variables are process/session scoped.
+
+Probe warnings identify the operation and safe failure category without printing response bodies or credentials. `HTTP 403` means probe authorization/CSRF rejected the submission; for the probe client, compare that terminal's key configuration with the backend's. `HTTP 404` indicates the resource identifier could not be resolved. `HTTP 400` indicates request validation failed. A connection/timeout warning indicates the backend could not be reached.
+
 ### Local setup and commands (Windows PowerShell)
 
-1. Start the local PostgreSQL service. Create the `cloudshield` database if needed. Do not point these commands at another database.
+1. Start the local PostgreSQL service and verify the existing `cloudshield` database is available. Do not drop, recreate, or point these commands at another database.
 2. Ensure `JAVA_HOME` points to a Java 21 JDK (the Maven Wrapper uses `JAVA_HOME` when it is set). Set the PostgreSQL password and initial bootstrap settings in the current PowerShell session. The password prompts are masked and are not written to disk. Configure bootstrap values only for the first startup, and set a strong one-time administrator password. MFA is optional but cannot be enabled until a stable encryption key is provisioned:
 
    ```powershell
-   $env:DB_PASSWORD = Read-Host -Prompt "PostgreSQL password" -MaskInput
+   Set-MaskedEnvironmentVariable 'DB_PASSWORD' 'PostgreSQL password'
    $env:BOOTSTRAP_ADMIN_USERNAME = "cloudshield-admin"
-   $env:BOOTSTRAP_ADMIN_PASSWORD = Read-Host -Prompt "Initial CloudShield admin password" -MaskInput
-   $env:PROBE_API_KEY = Read-Host -Prompt "Probe service key" -MaskInput
-   $env:MFA_ENCRYPTION_KEY = Read-Host -Prompt "Base64-encoded 32-byte MFA encryption key" -MaskInput
+   Set-MaskedEnvironmentVariable 'BOOTSTRAP_ADMIN_PASSWORD' 'Initial CloudShield admin password'
+   Set-MaskedEnvironmentVariable 'PROBE_API_KEY' 'Probe service key'
+   Set-MaskedEnvironmentVariable 'MFA_ENCRYPTION_KEY' 'Base64-encoded 32-byte MFA encryption key'
    ```
 
 3. Inspect/apply migrations and run the backend:
@@ -237,13 +261,45 @@ Spring maps these to `cloudshield.backend.url`, `cloudshield.probe.identifier`, 
 
 5. The frontend runs at `http://localhost:5173` and calls the backend at `http://localhost:8080`. Sign in with the bootstrap admin account, then use the ADMIN user access view to provision role-limited accounts. The backend allows this frontend origin. The probe listens on `http://localhost:8081` and requires the same `PROBE_API_KEY` as the backend.
 
+For the classroom run, keep each foreground process in its own PowerShell terminal and start each command from the repository root:
+
+```powershell
+# Backend terminal: set DB_PASSWORD, PROBE_API_KEY, and (only on first startup) bootstrap values first.
+Set-Location .\backend
+.\mvnw.cmd flyway:info
+.\mvnw.cmd spring-boot:run
+```
+
+```powershell
+# Probe terminal: set PROBE_API_KEY and the CLOUDSHIELD_* probe variables above first.
+Set-Location .\probe
+.\mvnw.cmd spring-boot:run
+```
+
+```powershell
+# Frontend terminal
+Set-Location .\frontend
+npm run dev
+```
+
+Check the public health endpoints from another terminal:
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/health
+Invoke-RestMethod http://localhost:8080/api/probe/heartbeat
+```
+
 To verify stored data, use `psql` and enter the database password at its prompt:
 
 ```powershell
 psql -h localhost -p 5432 -U postgres -d cloudshield -c "SELECT resource_identifier, name, status FROM monitored_resources;"
 psql -h localhost -p 5432 -U postgres -d cloudshield -c "SELECT metric_type, metric_value, collected_at FROM metric_samples ORDER BY collected_at DESC LIMIT 20;"
 psql -h localhost -p 5432 -U postgres -d cloudshield -c "SELECT probe_identifier, status, received_at FROM probe_heartbeats ORDER BY received_at DESC LIMIT 20;"
+psql -h localhost -p 5432 -U postgres -d cloudshield -c "SELECT alert_type, severity, status, created_at FROM alert_records ORDER BY created_at DESC LIMIT 20;"
+psql -h localhost -p 5432 -U postgres -d cloudshield -c "SELECT event_type, outcome, occurred_at FROM audit_events ORDER BY occurred_at DESC LIMIT 20;"
 ```
+
+Stop the demo by pressing `Ctrl+C` in each backend, probe, and frontend terminal. This stops those foreground applications without deleting records or stopping PostgreSQL.
 
 ### Tests and limitations
 

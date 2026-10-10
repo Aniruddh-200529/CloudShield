@@ -9,8 +9,10 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface MetricSampleRepository extends JpaRepository<MetricSample, UUID> {
-    @Query("select m from MetricSample m where m.resource.id = :resourceId and (:fromTime is null or m.collectedAt >= :fromTime) and (:toTime is null or m.collectedAt <= :toTime) order by m.collectedAt desc")
-    java.util.List<MetricSample> findHistory(@Param("resourceId") UUID resourceId, @Param("fromTime") Instant fromTime, @Param("toTime") Instant toTime, Pageable pageable);
+    java.util.List<MetricSample> findByResource_IdOrderByCollectedAtDesc(UUID resourceId, Pageable pageable);
+    java.util.List<MetricSample> findByResource_IdAndCollectedAtGreaterThanEqualOrderByCollectedAtDesc(UUID resourceId, Instant fromTime, Pageable pageable);
+    java.util.List<MetricSample> findByResource_IdAndCollectedAtLessThanEqualOrderByCollectedAtDesc(UUID resourceId, Instant toTime, Pageable pageable);
+    java.util.List<MetricSample> findByResource_IdAndCollectedAtBetweenOrderByCollectedAtDesc(UUID resourceId, Instant fromTime, Instant toTime, Pageable pageable);
     boolean existsByProbeIdentifierAndObservationId(String probeIdentifier, UUID observationId);
     java.util.Optional<MetricSample> findFirstByResource_IdAndMetricTypeOrderByCollectedAtDesc(java.util.UUID resourceId, String metricType);
     @Query("select m from MetricSample m where m.resource.id = :resourceId and m.metricType = :metricType and m.collectedAt >= :since order by m.collectedAt desc")

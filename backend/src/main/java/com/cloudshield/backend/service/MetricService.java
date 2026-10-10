@@ -22,6 +22,10 @@ public class MetricService {
     @Transactional(readOnly = true) public List<MetricSample> history(UUID resourceId, Instant from, Instant to, int limit) {
         resources.get(resourceId);
         if (from != null && to != null && from.isAfter(to)) throw new IllegalArgumentException("from must be less than or equal to to");
-        return metrics.findHistory(resourceId, from, to, PageRequest.of(0, limit));
+        PageRequest page = PageRequest.of(0, limit);
+        if (from != null && to != null) return metrics.findByResource_IdAndCollectedAtBetweenOrderByCollectedAtDesc(resourceId, from, to, page);
+        if (from != null) return metrics.findByResource_IdAndCollectedAtGreaterThanEqualOrderByCollectedAtDesc(resourceId, from, page);
+        if (to != null) return metrics.findByResource_IdAndCollectedAtLessThanEqualOrderByCollectedAtDesc(resourceId, to, page);
+        return metrics.findByResource_IdOrderByCollectedAtDesc(resourceId, page);
     }
 }
